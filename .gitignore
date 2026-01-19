@@ -1,0 +1,7 @@
+windows
+PixelStreamingInfrastructure/node_modules/
+PixelStreamingInfrastructure/Common/node_modules/
+PixelStreamingInfrastructure/Extras/FrontendTests/node_modules/
+PixelStreamingInfrastructure/SFU/node_modules/
+PixelStreamingInfrastructure/Signalling/node_modules/
+PixelStreamingInfrastructure/SignallingWebServer/node_modules/
