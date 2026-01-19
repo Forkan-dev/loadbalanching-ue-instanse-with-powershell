@@ -143,7 +143,7 @@ try {
                 $startResult = Invoke-RestMethod -Uri "http://$($availablePC.ip):$($availablePC.port)/start" -Method Post -TimeoutSec 5
                 Start-Sleep -Seconds 2
                 
-                $streamUrl = "http://${SIGNALING_SERVER_IP}/?StreamerId=$($availablePC.name)&AgentIP=$($availablePC.ip)&AgentPort=$($availablePC.port)"
+$streamUrl = "http://${SIGNALING_SERVER_IP}/?UseCamera=true&UseMic=true&HoveringMouse=true&StreamerId=$($availablePC.name)&AgentIP=$($availablePC.ip)&AgentPort=$($availablePC.port)"
                 Write-Host "  Redirecting to: $streamUrl" -ForegroundColor Yellow
                 
                 $html = @"
