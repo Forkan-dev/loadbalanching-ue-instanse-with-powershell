@@ -36,12 +36,17 @@ try {
     Write-Host "Visit: http://127.0.0.1:$Port" -ForegroundColor Yellow
     Write-Host ""
 
+    # Session Tracking: IP -> PC_Name
+    $sessionMap = @{}
+
     while ($true) {
         $context = $listener.GetContext()
         $request = $context.Request
         $response = $context.Response
         
+        $clientIP = $request.RemoteEndPoint.Address.ToString()
         $path = $request.Url.LocalPath
+
         if ($path -eq "/favicon.ico") {
             $response.StatusCode = 404
             $response.Close()
@@ -69,48 +74,66 @@ try {
         }
 
         # STRICT CHECK: Only allow "/" to start the game
-        # Any other path (e.g. apple-touch-icon, etc.) gets 404
         if ($path -ne "/") {
             $response.StatusCode = 404
             $response.Close()
             continue
         }
 
-        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Start Request from $($request.RemoteEndPoint)" -ForegroundColor Cyan
+        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Request from $clientIP" -ForegroundColor Cyan
         
-        # COOLDOWN CHECK: If we just started a PC < 5 seconds ago, ignore this request
-        # This fixes the "Double Browser Request" issue
-        if (((Get-Date) - $lastStartTime).TotalSeconds -lt 5) {
-            Write-Host "  Ignored: Cooldown active" -ForegroundColor DarkGray
-            $response.StatusCode = 429 # Too Many Requests
-            $html = "<html><head><meta http-equiv='refresh' content='2'></head><body><h1>Please wait...</h1><p>System is processing.</p></body></html>"
-            $buffer = [System.Text.Encoding]::UTF8.GetBytes($html)
-            $response.ContentLength64 = $buffer.Length
-            $response.OutputStream.Write($buffer, 0, $buffer.Length)
-            $response.Close()
-            continue
-        }
+        # COOLDOWN CHECK REMOVED: With Session Tracking, we don't need the global cooldown as strictly.
 
-        # Find available PC
+        # Find available PC or Resume Session
         $availablePC = $null
-        # Debug: Track errors
+        $needsStart = $false
         $debugErrors = @()
 
-        foreach ($pc in $PC_POOL) {
-            try {
-                Write-Host "  Checking $($pc.name)..." -ForegroundColor Gray
-                $status = Invoke-RestMethod -Uri "http://$($pc.ip):$($pc.port)/status" -TimeoutSec 5
-                if ($status.status -eq "idle") {
-                    $availablePC = $pc
-                    Write-Host "  $($pc.name) is available!" -ForegroundColor Green
-                    break
-                } else {
-                    $debugErrors += "$($pc.name): Busy (Status: $($status.status))"
+        # 1. Check if this IP already has a session
+        if ($sessionMap.ContainsKey($clientIP)) {
+            $assignedPCName = $sessionMap[$clientIP]
+            Write-Host "  Existing session found for $clientIP -> $assignedPCName" -ForegroundColor Cyan
+            
+            # Verify the assigned PC is still valid and running/idle
+            $assignedPC = $pc_pool | Where-Object { $_.name -eq $assignedPCName }
+            
+            if ($null -ne $assignedPC) {
+                try {
+                    $status = Invoke-RestMethod -Uri "http://$($assignedPC.ip):$($assignedPC.port)/status" -TimeoutSec 2
+                    if ($status.status -eq "running" -or $status.status -eq "idle") {
+                        $availablePC = $assignedPC
+                        $needsStart = ($status.status -eq "idle") # If it went idle, restart it. If running, just join.
+                        Write-Host "    Re-joining session on $($assignedPC.name) (Status: $($status.status))" -ForegroundColor Green
+                    } else {
+                        Write-Host "    Session invalid: PC busy/error. Clearing session." -ForegroundColor Yellow
+                        $sessionMap.Remove($clientIP)
+                    }
+                } catch {
+                    Write-Host "    Session invalid: PC unreachable. Clearing session." -ForegroundColor Red
+                    $sessionMap.Remove($clientIP)
                 }
-            } catch {
-                $err = "Cannot reach $($pc.name): $($_.Exception.Message)"
-                Write-Host "  $err" -ForegroundColor Red
-                $debugErrors += $err
+            }
+        }
+
+        # 2. If no valid session, find a new Idle PC
+        if ($null -eq $availablePC) {
+            foreach ($pc in $PC_POOL) {
+                try {
+                    # Skip if this PC is assigned to SOMEONE ELSE (optional strictness: currently assuming if it says idle, it's free)
+                    
+                    $status = Invoke-RestMethod -Uri "http://$($pc.ip):$($pc.port)/status" -TimeoutSec 2
+                    if ($status.status -eq "idle") {
+                        $availablePC = $pc
+                        $needsStart = $true
+                        
+                        # Create new session
+                        $sessionMap[$clientIP] = $pc.name
+                        Write-Host "  Assigned new local session: $clientIP -> $($pc.name)" -ForegroundColor Green
+                        break
+                    }
+                } catch {
+                    $debugErrors += "$($pc.name): Unreachable"
+                }
             }
         }
         
@@ -140,10 +163,15 @@ try {
             $lastStartTime = Get-Date
             
             try {
-                $startResult = Invoke-RestMethod -Uri "http://$($availablePC.ip):$($availablePC.port)/start" -Method Post -TimeoutSec 5
-                Start-Sleep -Seconds 2
+                if ($needsStart) {
+                    Write-Host "  Sending START command to $($availablePC.name)..." -ForegroundColor Green
+                    $startResult = Invoke-RestMethod -Uri "http://$($availablePC.ip):$($availablePC.port)/start" -Method Post -TimeoutSec 5
+                    Start-Sleep -Seconds 2
+                } else {
+                    Write-Host "  Skipping START command (Instance already running)..." -ForegroundColor Yellow
+                }
                 
-$streamUrl = "http://${SIGNALING_SERVER_IP}/?UseCamera=true&UseMic=true&HoveringMouse=true&StreamerId=$($availablePC.name)&AgentIP=$($availablePC.ip)&AgentPort=$($availablePC.port)"
+                $streamUrl = "http://${SIGNALING_SERVER_IP}/?UseCamera=true&UseMic=true&HoveringMouse=true&StreamerId=$($availablePC.name)&AgentIP=$($availablePC.ip)&AgentPort=$($availablePC.port)"
                 Write-Host "  Redirecting to: $streamUrl" -ForegroundColor Yellow
                 
                 $html = @"
